@@ -2,6 +2,7 @@
 # MIT License (see License)
 
 import os
+import glob
 from zipfile import ZipFile
 import io
 from PIL import Image
@@ -9,7 +10,44 @@ from lektor.pluginsystem import Plugin
 
 
 def listpackages(folder):
-    return list(filter(lambda f: f.endswith(".pk3") ,os.listdir(folder)))
+    return list(filter(lambda f: f.endswith(".pk3"), os.listdir(folder)))
+
+
+def is_image(fname):
+    return any([fname.endswith(suffix) for suffix in
+                ["jpeg", "jpg", "png", "tga"]])
+
+
+def save_as_jpg(fname, out_file):
+    img = Image.open(fname)
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    img.save(out_file, "JPEG")
+
+
+def extract_mapshots_from_pk3(pk3, mapshot_dir, mapshots_to_clean=[]):
+    with ZipFile(pk3, "r") as zf:
+        for f in zf.namelist():
+            temp = f.split("/")
+            if len(temp) != 2:
+                continue
+            if temp[0] != "maps":
+                continue
+            if not is_image(temp[1]):
+                continue
+            img_name = temp[1].rsplit(".", 1)[0] + ".jpg"
+            if img_name in mapshots_to_clean:
+                mapshots_to_clean.remove(img_name)
+                continue
+            out_name = os.path.join(mapshot_dir, img_name)
+            if os.path.isfile(out_name):
+                # the same mapshot can be in different pk3s
+                continue
+            src = io.BytesIO(zf.read(f))
+            try:
+                save_as_jpg(src, out_name)
+            except Exception as e:
+                print("Error when extracting {}: {}".format(f, e))
 
 
 class XonoticSupportPlugin(Plugin):
@@ -53,7 +91,7 @@ class XonoticSupportPlugin(Plugin):
         return info
 
     def get_pk3_folder(self):
-        return self.get_config().get("xonotic-support.folder", None)
+        return self.get_config().get("xonotic-support.customfolder", None)
 
     def get_pk3s(self):
         folder = self.get_pk3_folder()
@@ -70,41 +108,38 @@ class XonoticSupportPlugin(Plugin):
             return zf.namelist()
 
     def on_before_build_all(self, builder, **extra):
-        if not self.get_config().get_bool("xonotic-support.extract-mapshots",
-                                          False):
+        config = self.get_config()
+        if not config.get_bool("xonotic-support.extract-mapshots", False):
             return
         pk3_folder = self.get_pk3_folder()
+        install_folder = config.get("xonotic-support.installfolder", None)
         mapshot_dir = os.path.join(self.env.root_path, "assets", "images",
                                    "mapshots")
         os.makedirs(mapshot_dir, exist_ok=True)
         mapshots_to_clean = os.listdir(mapshot_dir)
-        image_suffixes = ["jpeg", "jpg", "png", "tga"]
-        for pk3 in self.get_pk3s():
-            with ZipFile(os.path.join(pk3_folder, pk3), "r") as zf:
-                for f in zf.namelist():
-                    temp = f.split("/")
-                    if len(temp) != 2:
-                        continue
-                    if temp[0] != "maps":
-                        continue
-                    if not any([temp[1].endswith(suffix) for suffix in
-                                image_suffixes]):
-                        continue
-                    img_name = temp[1].rsplit(".", 1)[0] + ".jpg"
+        if install_folder:
+            data_path = os.path.join(install_folder, "data")
+            if os.path.isdir(os.path.join(data_path, "xonotic-maps.pk3dir")):
+                mappath = os.path.join(data_path, "xonotic-maps.pk3dir", "maps")
+                for image in filter(lambda x: is_image(x), os.listdir(mappath)):
+                    img_name = image.rsplit(".", 1)[0] + ".jpg"
                     if img_name in mapshots_to_clean:
                         mapshots_to_clean.remove(img_name)
                         continue
                     out_name = os.path.join(mapshot_dir, img_name)
                     if os.path.isfile(out_name):
-                        # the same mapshot can be in different pk3s
+                        # the same mapshot can be in different pk3s/pk3dirs
                         continue
-                    src = io.BytesIO(zf.read(f))
-                    try:
-                        img = Image.open(src)
-                        if img.mode != "RGB":
-                            img = img.convert("RGB")
-                        img.save(os.path.join(mapshot_dir, img_name), "JPEG")
-                    except Exception as e:
-                        print("Error when extracting {}: {}".format(f, e))
+                    save_as_jpg(os.path.join(mappath, image), out_name)
+            else:
+                temp = glob.glob(os.path.join(data_path, "xonotic-*-maps.pk3"))
+                if len(temp) != 1:
+                    raise EnvironmentError("Xonotic installation does not have"
+                                           "exactly 1 xonotic-*-maps.pk3")
+                pk3 = temp[0]
+                extract_mapshots_from_pk3(pk3, mapshot_dir, mapshots_to_clean)
+        for pk3 in self.get_pk3s():
+            extract_mapshots_from_pk3(os.path.join(pk3_folder, pk3), mapshot_dir,
+                                      mapshots_to_clean)
         for f in mapshots_to_clean:
             os.remove(os.path.join(mapshot_dir, f))
